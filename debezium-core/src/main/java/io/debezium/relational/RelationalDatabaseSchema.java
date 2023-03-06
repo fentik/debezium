@@ -19,6 +19,7 @@ import io.debezium.relational.Tables.TableFilter;
 import io.debezium.relational.mapping.ColumnMappers;
 import io.debezium.schema.DatabaseSchema;
 import io.debezium.spi.topic.TopicNamingStrategy;
+import io.debezium.util.BoundedConcurrentHashMap;
 
 /**
  * A {@link DatabaseSchema} of a relational database such as Postgres. Provides information about the physical structure
@@ -29,6 +30,8 @@ import io.debezium.spi.topic.TopicNamingStrategy;
 public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId> {
     private final static Logger LOG = LoggerFactory.getLogger(RelationalDatabaseSchema.class);
 
+    private static final int TABLE_FILTER_CACHE_SIZE = 10_000;
+
     private final TopicNamingStrategy<TableId> topicNamingStrategy;
     private final TableSchemaBuilder schemaBuilder;
     private final TableFilter tableFilter;
@@ -38,6 +41,9 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
 
     private final SchemasByTableId schemasByTableId;
     private final Tables tables;
+
+    private BoundedConcurrentHashMap<TableId, Boolean> tableFilterCache;
+    private long lastFilterCacheStats;
 
     protected RelationalDatabaseSchema(RelationalDatabaseConnectorConfig config, TopicNamingStrategy<TableId> topicNamingStrategy,
                                        TableFilter tableFilter, ColumnNameFilter columnFilter, TableSchemaBuilder schemaBuilder,
@@ -52,6 +58,10 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
 
         this.schemasByTableId = new SchemasByTableId(tableIdCaseInsensitive);
         this.tables = new Tables(tableIdCaseInsensitive);
+
+        this.tableFilterCache = new BoundedConcurrentHashMap<>(TABLE_FILTER_CACHE_SIZE, 16, BoundedConcurrentHashMap.Eviction.LRU);
+        this.lastFilterCacheStats = System.currentTimeMillis();
+        LOG.info("tableFilterCache initialized");
     }
 
     @Override
@@ -98,7 +108,30 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
      *         or if the table has been excluded by the filters
      */
     public Table tableFor(TableId id) {
-        return tableFilter.isIncluded(id) ? tables.forTable(id) : null;
+        boolean included, cachedIncluded;
+
+        long start = System.nanoTime();
+        included = tableFilter.isIncluded(id);
+        long filterDurationUs = (System.nanoTime() - start) / 1000;
+        long cacheDurationUs = -1;
+
+        if (tableFilterCache.containsKey(id)) {
+            start = System.nanoTime();
+            cachedIncluded = tableFilterCache.get(id);
+            cacheDurationUs = (System.nanoTime() - start) / 1000;
+        } else {
+            tableFilterCache.put(id, included);
+            cachedIncluded = included;
+        }
+
+        if (System.currentTimeMillis() - lastFilterCacheStats > 10000) {
+            LOG.info("tableFor timing: " + id + " filter " + filterDurationUs + "us; cache: " + cacheDurationUs + "us");
+            lastFilterCacheStats = System.currentTimeMillis();
+        }
+        if (cachedIncluded != included) {
+            LOG.warn("Invalid cachedIncluded value: " + id + " " + cachedIncluded);
+        }
+        return included ? tables.forTable(id) : null;
     }
 
     @Override
