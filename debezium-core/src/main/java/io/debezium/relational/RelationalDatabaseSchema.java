@@ -43,7 +43,6 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
     private final Tables tables;
 
     private BoundedConcurrentHashMap<TableId, Boolean> tableFilterCache;
-    private long lastFilterCacheStats;
 
     protected RelationalDatabaseSchema(RelationalDatabaseConnectorConfig config, TopicNamingStrategy<TableId> topicNamingStrategy,
                                        TableFilter tableFilter, ColumnNameFilter columnFilter, TableSchemaBuilder schemaBuilder,
@@ -60,8 +59,6 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
         this.tables = new Tables(tableIdCaseInsensitive);
 
         this.tableFilterCache = new BoundedConcurrentHashMap<>(TABLE_FILTER_CACHE_SIZE, 16, BoundedConcurrentHashMap.Eviction.LRU);
-        this.lastFilterCacheStats = System.currentTimeMillis();
-        LOG.info("tableFilterCache initialized");
     }
 
     @Override
@@ -108,28 +105,12 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
      *         or if the table has been excluded by the filters
      */
     public Table tableFor(TableId id) {
-        boolean included, cachedIncluded;
-
-        long start = System.nanoTime();
-        included = tableFilter.isIncluded(id);
-        long filterDurationUs = (System.nanoTime() - start) / 1000;
-        long cacheDurationUs = -1;
-
+        boolean included;
         if (tableFilterCache.containsKey(id)) {
-            start = System.nanoTime();
-            cachedIncluded = tableFilterCache.get(id);
-            cacheDurationUs = (System.nanoTime() - start) / 1000;
+            included = tableFilterCache.get(id);
         } else {
+            included = tableFilter.isIncluded(id);
             tableFilterCache.put(id, included);
-            cachedIncluded = included;
-        }
-
-        if (System.currentTimeMillis() - lastFilterCacheStats > 10000) {
-            LOG.info("tableFor timing: " + id + " filter " + filterDurationUs + "us; cache: " + cacheDurationUs + "us");
-            lastFilterCacheStats = System.currentTimeMillis();
-        }
-        if (cachedIncluded != included) {
-            LOG.warn("Invalid cachedIncluded value: " + id + " " + cachedIncluded);
         }
         return included ? tables.forTable(id) : null;
     }
